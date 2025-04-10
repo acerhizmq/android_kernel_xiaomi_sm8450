@@ -836,12 +836,13 @@ static const struct mm_walk_ops madvise_free_walk_ops = {
 	.walk_lock		= PGWALK_RDLOCK,
 };
 
-static int madvise_free_single_vma(struct vm_area_struct *vma,
+static int madvise_free_single_vma(struct madvise_behavior *madv_behavior,
+			struct vm_area_struct *vma,
 			unsigned long start_addr, unsigned long end_addr)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct mmu_notifier_range range;
-	struct mmu_gather tlb;
+	struct mmu_gather *tlb = madv_behavior->tlb;
 
 	/* MADV_FREE works for only anon vma at the moment */
 	if (!vma_is_anonymous(vma))
@@ -857,17 +858,14 @@ static int madvise_free_single_vma(struct vm_area_struct *vma,
 				range.start, range.end);
 
 	lru_add_drain();
-	tlb_gather_mmu(&tlb, mm);
 	update_hiwater_rss(mm);
 
 	mmu_notifier_invalidate_range_start(&range);
-	tlb_start_vma(&tlb, vma);
+	tlb_start_vma(tlb, vma);
 	walk_page_range(vma->vm_mm, range.start, range.end,
-			&madvise_free_walk_ops, &tlb);
-	tlb_end_vma(&tlb, vma);
+			&madvise_free_walk_ops, tlb);
+	tlb_end_vma(tlb, vma);
 	mmu_notifier_invalidate_range_end(&range);
-	tlb_finish_mmu(&tlb);
-
 	return 0;
 }
 
@@ -988,7 +986,7 @@ static long madvise_dontneed_free(struct vm_area_struct *vma,
 	if (behavior == MADV_DONTNEED || behavior == MADV_DONTNEED_LOCKED)
 		return madvise_dontneed_single_vma(vma, start, end);
 	else if (behavior == MADV_FREE)
-		return madvise_free_single_vma(vma, start, end);
+		return madvise_free_single_vma(madv_behavior, vma, start, end);
 	else
 		return -EINVAL;
 }
@@ -1553,6 +1551,29 @@ static void madvise_unlock(struct mm_struct *mm,
 	madv_behavior->lock_mode = MADVISE_NO_LOCK;
 }
 
+static bool madvise_batch_tlb_flush(int behavior)
+{
+	switch (behavior) {
+	case MADV_FREE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void madvise_init_tlb(struct madvise_behavior *madv_behavior,
+		struct mm_struct *mm)
+{
+	if (madvise_batch_tlb_flush(madv_behavior->behavior))
+		tlb_gather_mmu(madv_behavior->tlb, mm);
+}
+
+static void madvise_finish_tlb(struct madvise_behavior *madv_behavior)
+{
+	if (madvise_batch_tlb_flush(madv_behavior->behavior))
+		tlb_finish_mmu(madv_behavior->tlb);
+}
+
 /*
  * untagged_addr_remote() assumes mmap_lock is already held. On
  * architectures like x86 and RISC-V, tagging is tricky because each
@@ -1646,7 +1667,11 @@ int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int beh
 	int error;
 	size_t len;
 	struct blk_plug plug;
-	struct madvise_behavior madv_behavior = {.behavior = behavior};
+	struct mmu_gather tlb;
+	struct madvise_behavior madv_behavior = {
+		.behavior = behavior,
+		.tlb = &tlb,
+	};
 	bool bypass = false;
 
 	if (!madvise_behavior_valid(behavior))
@@ -1689,10 +1714,16 @@ int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int beh
 	start = get_untagged_addr(mm, start);
 	end = start + len;
 
+	/*
+	 * Initialize the gather only after the bypass hook above, which
+	 * returns early: tlb_gather_mmu() raises mm->tlb_flush_pending.
+	 */
+	madvise_init_tlb(&madv_behavior, mm);
 	blk_start_plug(&plug);
 	error = madvise_walk_vmas(mm, start, end, &madv_behavior,
 			&madv_behavior, madvise_vma_behavior);
 	blk_finish_plug(&plug);
+	madvise_finish_tlb(&madv_behavior);
 
 	madvise_unlock(mm, &madv_behavior);
 
