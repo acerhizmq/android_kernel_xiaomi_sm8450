@@ -888,12 +888,14 @@ static int madvise_free_single_vma(struct madvise_behavior *madv_behavior,
  * An interface that causes the system to free clean pages and flush
  * dirty pages is already available as msync(MS_INVALIDATE).
  */
-static long madvise_dontneed_single_vma(struct vm_area_struct *vma,
+static long madvise_dontneed_single_vma(struct madvise_behavior *madv_behavior,
+					struct vm_area_struct *vma,
 					unsigned long start, unsigned long end)
 {
 	madvise_vma_pad_pages(vma, start, end);
 
-	zap_page_range_single(vma, start, end - start, NULL);
+	zap_page_range_single_batched(
+			madv_behavior->tlb, vma, start, end - start, NULL);
 	return 0;
 }
 
@@ -984,7 +986,8 @@ static long madvise_dontneed_free(struct vm_area_struct *vma,
 	}
 
 	if (behavior == MADV_DONTNEED || behavior == MADV_DONTNEED_LOCKED)
-		return madvise_dontneed_single_vma(vma, start, end);
+		return madvise_dontneed_single_vma(
+				madv_behavior, vma, start, end);
 	else if (behavior == MADV_FREE)
 		return madvise_free_single_vma(madv_behavior, vma, start, end);
 	else
@@ -1554,6 +1557,8 @@ static void madvise_unlock(struct mm_struct *mm,
 static bool madvise_batch_tlb_flush(int behavior)
 {
 	switch (behavior) {
+	case MADV_DONTNEED:
+	case MADV_DONTNEED_LOCKED:
 	case MADV_FREE:
 		return true;
 	default:
