@@ -10,7 +10,7 @@
 
 #include <linux/mm_types.h>
 #include <linux/err.h>
-#include "binder_alloc.h"
+#include "binder_internal.h"
 
 #define BUFFER_NUM 5
 #define BUFFER_MIN_SIZE (PAGE_SIZE / 8)
